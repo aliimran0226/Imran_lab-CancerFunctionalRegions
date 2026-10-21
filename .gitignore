@@ -1,0 +1,25 @@
+# Data — never commit. COSMIC is licensed; structures are large.
+# Everything lives under cfr_data/, which Stage 0 populates locally.
+cfr_data/
+
+# Defense in depth against accidentally committing data files anywhere.
+*.tsv
+*.tsv.gz
+*.csv.gz
+*.fasta.gz
+*.gff.gz
+*.cif
+*.xml.gz
+*.part
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store

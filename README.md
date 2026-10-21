@@ -73,13 +73,13 @@ re-running skips anything already downloaded.
 
 ## Stages
 
-| Stage | Script                      | Output                                            |
-| ----- | --------------------------- | ------------------------------------------------- |
-| 0     | `stage0.py`                 | downloaded inputs in `raw/`                       |
-| 1     | `stage1.py`                 | `stage1_mutations.tsv` (clean missense mutations) |
-| 2a    | `stage2a_structselect.py`   | `stage2a_representative_structures.tsv`           |
-| 2     | `stage2_map_coordinates.py` | `stage2_mapped.tsv`, `stage2_failures.tsv`        |
-| 2b    | `stage2b_residues.py`       | `stage2_residues.tsv` (per-residue universe)      |
+| Stage | Script | Output |
+|-------|--------|--------|
+| 0  | `stage0.py` | downloaded inputs in `raw/` |
+| 1  | `stage1.py` | `stage1_mutations.tsv` (clean missense mutations) |
+| 2a | `stage2a_structselect.py` | `stage2a_representative_structures.tsv` |
+| 2  | `stage2_map_coordinates.py` | `stage2_mapped.tsv`, `stage2_failures.tsv` |
+| 2b | `stage2b_residues.py` | `stage2_residues.tsv` (per-residue universe) |
 
 ## Notes
 

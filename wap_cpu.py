@@ -38,6 +38,7 @@ import time
 from collections import Counter
 from datetime import datetime
 from itertools import permutations
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Third-party imports
@@ -1401,32 +1402,9 @@ def run_gene(
     gene_name: str,
     iterations: int,
 ) -> tuple | None:
-    """Run the full WAP analysis pipeline for a single gene.
+    """Run the full WAP analysis pipeline for a single gene, pooling mutations
 
-    Loads cancer mutation data and 3D coordinates, computes the observed WAP
-    score, and runs a vectorized permutation test for each of four N(q)
-    functions.
-
-    Parameters
-    ----------
-    tsv_filepath : str
-        Path to the mapped mutations TSV (``stage2_mapped.tsv``).
-    residue_tsv_filepath : str
-        Path to the residues TSV (``stage2_residues.tsv``).
-    gene_name : str
-        Gene symbol to analyse.
-    iterations : int
-        Number of permutation iterations per N(q) function.
-
-    Returns
-    -------
-    tuple or None
-        ``(len_structure, len_mutated, best_structure, results)`` on success;
-        ``None`` if the gene has insufficient data.
-
-        *results* is a list of dicts — one per N(q) function — each containing:
-        ``"label"``, ``"observed"``, ``"p_value"``, ``"mean_random"``,
-        ``"random_scores"``.
+    across all structure sources using UniProt coordinates.
     """
     print(f"Loading data for {gene_name} from mapped TSV...")
     df = pd.read_csv(tsv_filepath, sep="\t")
@@ -1436,20 +1414,32 @@ def run_gene(
         print(f"Error: No data found for {gene_name} in the TSV file. Skipping.")
         return None
 
-    # Use the structure source that covers the most mutations
-    best_structure = gene_df["structure_source"].value_counts().idxmax()
-    print(f"Filtering to structure source: {best_structure}.")
+    # Load available structure sources for this gene from residues TSV
+    residue_df = pd.read_csv(residue_tsv_filepath, sep="\t")
+    available_structures = set(
+        residue_df[residue_df["gene"] == gene_name]["structure_source"]
+        .dropna()
+        .unique()
+    )
 
-    structure_df = gene_df[gene_df["structure_source"] == best_structure].copy()
+    if not available_structures:
+        print(
+            f"Error: No residue structure data found for {gene_name} in residue TSV. Skipping."
+        )
+        return None
 
-    # Build the mutation-count dictionary; discard outlier positions (> 1000 mutations)
-    filtered_cancer_data = {
-        pos: count
-        for pos, count in structure_df["position"].value_counts().items()
-        if count <= 1000
-    }
+    # Select the structure source present in residues TSV that has the most entries in mapped TSV
+    valid_gene_df = gene_df[gene_df["structure_source"].isin(available_structures)]
+    if valid_gene_df.empty:
+        print(
+            f"Error: No matching structure source between mapped TSV and residue TSV for {gene_name}. Skipping."
+        )
+        return None
 
-    # Load all resolved Cα coordinates for the chosen structure
+    best_structure = valid_gene_df["structure_source"].value_counts().idxmax()
+    print(f"Selected 3D structure source: {best_structure}.")
+
+    # Load all resolved Cα coordinates for the chosen structure template
     aligned_structure_map = create_structure_map_from_tsv(
         residue_tsv_filepath, gene_name, best_structure
     )
@@ -1457,14 +1447,26 @@ def run_gene(
         print(f"Error: No structure data found for {gene_name}. Skipping.")
         return None
 
-    # Keep only mutated positions that are resolved in the structure
+    # Pool mutations across ALL structure sources for this gene based on UniProt position
+    all_mutation_counts = gene_df["position"].value_counts()
+
+    # Exclude outlier positions (> 1000 mutations)
+    filtered_cancer_data = {
+        pos: count for pos, count in all_mutation_counts.items() if count <= 1000
+    }
+
     n_before = len(filtered_cancer_data)
+
+    # Retain only positions that exist in the selected 3D structure map
     filtered_cancer_data = {
         pos: count
         for pos, count in filtered_cancer_data.items()
         if pos in aligned_structure_map
     }
-    print(f"Mutated positions in structure: {len(filtered_cancer_data)} of {n_before}")
+
+    print(
+        f"Pooled mutated positions resolved in structure: {len(filtered_cancer_data)} of {n_before}"
+    )
 
     len_structure = len(aligned_structure_map)
     len_mutated = len(filtered_cancer_data)
@@ -1475,7 +1477,7 @@ def run_gene(
         print("Error: Not enough valid mutations to calculate WAP score. Skipping.")
         return None
 
-    # Pre-compute shared matrices (computed once, reused for all four N(q) functions)
+    # Pre-compute shared matrices
     distance_matrix = calculate_distance_matrix(aligned_structure_map)
     res_to_index = build_index_map(aligned_structure_map)
     exp_matrix = create_expotential_map(distance_matrix)
@@ -1495,7 +1497,7 @@ def run_gene(
         )
         print(f"Observed WAP Score [{label}]: {observed_score:.6f}")
 
-        # Auto-size batch to avoid RAM exhaustion for large proteins
+        # Auto-size batch size
         k = len(filtered_cancer_data)
         N = exp_matrix.shape[0]
         batch_size = max(1, min(int(3e8 / (k * k * 8)), int(6e7 / N)))
@@ -1630,44 +1632,95 @@ def main() -> None:
     """Run the multi-gene WAP analysis pipeline and save results to a PDF.
 
     Edit the ``GENES`` list and the file paths below to customise the run.
-    The PDF is written to ``WAP_results/`` in the current working directory,
+    The PDF is written to ``WAP_results_CPU/`` in the current working directory,
     with a timestamp in the filename so previous runs are not overwritten.
     """
     # ------------------------------------------------------------------ #
     #  CONFIGURATION — edit these paths and parameters as needed          #
     # ------------------------------------------------------------------ #
-    tsv_filepath = r"data\stage2_mapped.tsv"
-    residue_tsv_filepath = r"data\stage2_residues.tsv"
-    iterations = 10**4
+    data_root = Path(os.environ.get("CFR_DATA_ROOT", "./cfr_data")).resolve()
+    run_tag = os.environ.get("CFR_RUN_TAG", f"run_{datetime.now().strftime('%Y-%m-%d')}")
+    processed = data_root / "processed" / run_tag
 
-    genes = [
-        "KMT2C",
-        "BRAF",
-        "ATR",
-        "BTK",
-        "BRCA1",
-        "BRCA2",
-        "TP53",
-        "PTEN",
-        "PALB2",
-        "CHEK2",
-        "ATM",
-        "CDH1",
-        "STK11",
-        "BARD1",
-        "BRIP1",
-        "RAD51C",
-        "RAD51D",
-        "NBN",
-        "NF1",
-        "CD24",
-        "CYP19A1",
-        "FGFR2",
-        "MAP3K1",
-        "MLH1",
-    ]
+    tsv_filepath = str(processed / "stage2_mapped.tsv")
+    residue_tsv_filepath = str(processed / "stage2_residues.tsv")
+    iterations = int(os.environ.get("CFR_ITERATIONS", 10**6))
 
-    output_folder = "WAP_results"
+    genes = sorted(pd.read_csv(residue_tsv_filepath, sep="\t")["gene"].dropna().unique().tolist())
+    print(genes)
+    print(len(genes))
+
+    # genes = [
+    # "A1CF", "ABI1", "ABL1", "ABL2", "ACKR3", "ACVR1", "ACVR1B", "ACVR2A", "AFDN", "AFF4",
+    # "AKT1", "AKT2", "AKT3", "ALDH2", "ALK", "AMER1", "ANK1", "APC", "APOBEC3B", "AR",
+    # "ARAF", "ARHGAP26", "ARHGAP35", "ARHGAP5", "ARHGEF12", "ARID1A", "ARID1B", "ARID2", "ARNT", "ASPSCR1",
+    # "ASXL1", "ATIC", "ATM", "ATP1A1", "ATR", "ATRX", "AXIN1", "AXIN2", "B2M", "BAP1",
+    # "BARD1", "BAX", "BAZ1A", "BCL10", "BCL11A", "BCL11B", "BCL2", "BCL3", "BCL6", "BCL7A",
+    # "BCL9", "BCL9L", "BCLAF1", "BCOR", "BCORL1", "BCR", "BIRC3", "BIRC6", "BLM", "BMPR1A",
+    # "BRAF", "BRCA1", "BRCA2", "BRD3", "BRD4", "BRIP1", "BTG2", "BTK", "BUB1B", "CACNA1D",
+    # "CALR", "CAMTA1", "CANT1", "CARD11", "CASP3", "CASP8", "CASP9", "CBFA2T3", "CBFB", "CBL",
+    # "CBLB", "CBLC", "CCDC6", "CCNB1IP1", "CCNC", "CCND1", "CCND2", "CCND3", "CCNE1", "CCR4",
+    # "CCR7", "CD209", "CD274", "CD28", "CD74", "CD79A", "CD79B", "CDC73", "CDH1", "CDH17",
+    # "CDK12", "CDK4", "CDK6", "CDKN1A", "CDKN1B", "CDKN2A", "CDKN2C", "CDX2", "CEBPA", "CHCHD7",
+    # "CHD4", "CHEK2", "CHIC2", "CLIP1", "CLP1", "CLTC", "CNOT3", "CNTNAP2", "COL1A1", "COL2A1",
+    # "COL3A1", "COX6C", "CPEB3", "CREB1", "CREBBP", "CRLF2", "CRNKL1", "CRTC1", "CSF1R", "CSF3R",
+    # "CTCF", "CTNNA1", "CTNNA2", "CTNNB1", "CTNND1", "CUL3", "CUX1", "CXCR4", "CYLD", "CYP2C8",
+    # "CYSLTR2", "DAXX", "DCC", "DCTN1", "DDB2", "DDR2", "DDX10", "DDX3X", "DDX5", "DDX6",
+    # "DEK", "DGCR8", "DICER1", "DNAJB1", "DNM2", "DNMT3A", "DROSHA", "EBF1", "EED", "EGFR",
+    # "EIF1AX", "EIF3E", "EIF4A2", "ELF3", "ELK4", "ELL", "EML4", "EP300", "EPAS1", "EPHA3",
+    # "EPHA7", "EPS15", "ERBB2", "ERBB3", "ERBB4", "ERCC2", "ERCC3", "ERCC4", "ERCC5", "ERG",
+    # "ESR1", "ETV1", "ETV4", "ETV5", "ETV6", "EWSR1", "EXT1", "EXT2", "EZH2", "EZR",
+    # "FADD", "FANCA", "FANCC", "FANCD2", "FANCE", "FANCF", "FANCG", "FAS", "FAT4", "FBXO11",
+    # "FBXW7", "FCGR2B", "FCRL4", "FEN1", "FES", "FEV", "FGFR1", "FGFR2", "FGFR3", "FGFR4",
+    # "FH", "FHIT", "FIP1L1", "FLCN", "FLI1", "FLNA", "FLT3", "FLT4", "FNBP1", "FOXA1",
+    # "FOXL2", "FOXO1", "FOXO3", "FOXO4", "FOXP1", "FSTL3", "FUBP1", "FUS", "GAS7", "GATA1",
+    # "GATA2", "GATA3", "GLI1", "GMPS", "GNA11", "GNAQ", "GNAS", "GOLPH3", "GOPC", "GPC3",
+    # "GPHN", "GRIN2A", "GRM3", "GSK3B", "GTF2I", "HERPUD1", "HEY1", "HGF", "HIF1A", "HIP1",
+    # "HLA-A", "HMGA1", "HNF1A", "HNRNPA2B1", "HOOK3", "HOXA13", "HRAS", "HSP90AA1", "HSP90AB1", "ID3",
+    # "IDH1", "IDH2", "IGF2BP2", "IKBKB", "IKZF1", "IKZF3", "IL2", "IL21R", "IL6ST", "IL7R",
+    # "IRF4", "ITGAV", "ITK", "JAK1", "JAK2", "JAK3", "JUN", "KAT6A", "KAT6B", "KAT7",
+    # "KDM5A", "KDM5C", "KDM6A", "KDR", "KEAP1", "KIF5B", "KIT", "KLF4", "KLK2", "KMT2A",
+    # "KMT2C", "KMT2D", "KNL1", "KRAS", "LARP4B", "LASP1", "LATS1", "LATS2", "LCK", "LCP1",
+    # "LIFR", "LMNA", "LMO2", "LSM14A", "LYN", "LZTR1", "MALT1", "MAP2K1", "MAP2K2", "MAP2K4",
+    # "MAP3K1", "MAPK1", "MAX", "MB21D2", "MDM2", "MDM4", "MED12", "MEN1", "MET", "MGMT",
+    # "MITF", "MLH1", "MLLT1", "MLLT10", "MLLT3", "MPL", "MSH2", "MSH6", "MSI2", "MSN",
+    # "MTCP1", "MTOR", "MUC16", "MUTYH", "MYC", "MYCN", "MYD88", "MYH11", "MYH9", "MYO5A",
+    # "N4BP2", "NACA", "NBEA", "NBN", "NCKIPSD", "NCOA1", "NCOA2", "NCOR1", "NCOR2", "NDRG1",
+    # "NF1", "NF2", "NFATC2", "NFE2L2", "NFIB", "NFKB2", "NKX2-1", "NONO", "NOTCH1", "NOTCH2",
+    # "NPM1", "NR2F2", "NR4A3", "NRAS", "NRG1", "NSD1", "NSD2", "NSD3", "NT5C2", "NTHL1",
+    # "NTRK1", "NTRK2", "NTRK3", "NUMA1", "NUP214", "NUP98", "NUTM1", "OMD", "P2RY8", "PABPC1",
+    # "PAFAH1B2", "PALB2", "PATZ1", "PAX3", "PAX5", "PAX8", "PBX1", "PCBP1", "PCM1", "PDCD1LG2",
+    # "PDGFB", "PDGFRA", "PDGFRB", "PHF6", "PHOX2B", "PIK3CA", "PIK3R1", "PIK3R2", "PIM1", "PLCG1",
+    # "PLEC", "PML", "PMS1", "PMS2", "POLD1", "POLE", "POLG", "POLQ", "POLR2A", "POT1",
+    # "POU2AF1", "POU5F1", "PPARG", "PPM1D", "PPP2R1A", "PRDM1", "PRDM16", "PRDM2", "PREX2", "PRKACA",
+    # "PRKAR1A", "PRKCB", "PSIP1", "PTCH1", "PTEN", "PTK6", "PTPN11", "PTPN13", "PTPN6", "PTPRB",
+    # "PTPRC", "PTPRD", "PTPRK", "PTPRT", "QKI", "RABEP1", "RAC1", "RAD21", "RAD50", "RAD51",
+    # "RAD51B", "RAD51C", "RAD51D", "RAF1", "RALGDS", "RANBP2", "RAP1B", "RAP1GDS1", "RARA", "RASA1",
+    # "RB1", "RBM10", "RBM15", "RECQL4", "RET", "RFWD3", "RGS7", "RHOA", "RICTOR", "RMI2",
+    # "RNF213", "RNF43", "ROBO2", "ROCK1", "ROS1", "RPL10", "RPL22", "RPL5", "RPN1", "RRAS2",
+    # "RSPO2", "RUNX1", "RUNX1T1", "RXRA", "S100A7", "SALL4", "SBDS", "SDC4", "SDHA", "SDHAF2",
+    # "SDHB", "SDHC", "SDHD", "SET", "SETD1B", "SETD2", "SETDB1", "SF3B1", "SFPQ", "SGK1",
+    # "SIRPA", "SIX1", "SKI", "SMAD2", "SMAD3", "SMAD4", "SMARCA4", "SMARCB1", "SMARCD1", "SMARCE1",
+    # "SMC1A", "SMO", "SND1", "SOS1", "SOX2", "SPEN", "SPOP", "SRC", "SRSF2", "SRSF3",
+    # "SS18", "SSX1", "STAG1", "STAG2", "STAT3", "STAT5B", "STAT6", "STIL", "STK11", "SUB1",
+    # "SUFU", "SUZ12", "SYK", "TAL1", "TBL1XR1", "TBX3", "TCEA1", "TCF12", "TCF3", "TCF7L2",
+    # "TCL1A", "TEC", "TENT5C", "TERT", "TET1", "TET2", "TFE3", "TFEB", "TFG", "TFRC",
+    # "TGFBR2", "TMPRSS2", "TMSB4X", "TNC", "TNFAIP3", "TNFRSF14", "TNFRSF17", "TNRC18", "TOP1", "TP53",
+    # "TP63", "TPM3", "TPR", "TRAF7", "TRIM24", "TRIM33", "TRRAP", "TSC1", "TSC2", "TSHR",
+    # "U2AF1", "UBR5", "USP8", "USP9X", "VAV1", "VHL", "WAS", "WIF1", "WNK2", "WRN",
+    # "WT1", "WWTR1", "XPA", "XPO1", "YAP1", "YWHAE", "ZBTB16", "ZCCHC8", "ZEB1", "ZFHX3",
+    # "ZNRF3"
+    # ]
+
+    # genes = [
+    # "A1CF", "ABI1", "ABL1", "ABL2", "ACKR3", "ACVR1", "ACVR1B", "ACVR2A", "AFDN", "AFF4",
+    # "AKT1", "AKT2", "AKT3", "ALDH2", "ALK", "AMER1", "ANK1", "APC", "APOBEC3B", "AR",
+    # "ARAF", "ARHGAP26", "ARHGAP35", "ARHGAP5", "ARHGEF12", "ARID1A", "ARID1B", "ARID2", "ARNT", "ASPSCR1",
+    # "ASXL1", "ATIC", "ATM", "ATP1A1", "ATR", "ATRX", "AXIN1", "AXIN2", "B2M", "BAP1",
+    # "BARD1", "BAX", "BAZ1A", "BCL10", "BCL11A", "BCL11B", "BCL2", "BCL3", "BCL6", "BCL7A"
+    # ]
+
+    output_folder = "WAP_results_CPU"
     output_pdf = os.path.join(
         output_folder,
         f"WAP_all_genes_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.pdf",
@@ -1714,3 +1767,6 @@ def main() -> None:
         add_summary_page(pdf, summary_rows, title="Summary of all genes")
 
     print(f"\nDone. PDF saved as: {output_pdf}")
+
+if __name__ == "__main__":
+    main()

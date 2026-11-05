@@ -1,0 +1,14 @@
+# CFR pipeline — CPU dependencies.
+# Covers the data stages (0–2b) AND the CPU WAP scorer (wap_cpu.py).
+# No PyTorch here: the CPU scorer is numpy-only.
+#
+# For a reproducible setup, pin these to the versions you actually ran:
+# run `pip freeze` in your working environment and paste the exact versions.
+
+biopython>=1.81
+pandas>=2.0
+scipy>=1.10
+matplotlib>=3.7
+seaborn>=0.12
+tabulate>=0.9
+requests>=2.31

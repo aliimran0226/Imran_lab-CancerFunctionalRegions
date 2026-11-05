@@ -1,0 +1,17 @@
+# CFR pipeline — GPU dependencies.
+# Everything in the CPU set, plus PyTorch for wap_gpu.py.
+-r requirements-cpu.txt
+
+# PyTorch is intentionally NOT pinned here, because the correct wheel depends
+# on your machine's CUDA version. Install it SEPARATELY, before or after this
+# file, with the matching index URL. Check your CUDA with `nvidia-smi` first.
+#
+#   CUDA 12.1:   pip install torch --index-url https://download.pytorch.org/whl/cu121
+#   CUDA 11.8:   pip install torch --index-url https://download.pytorch.org/whl/cu118
+#   CPU only:    pip install torch --index-url https://download.pytorch.org/whl/cpu
+#
+# Verify the GPU is visible to Torch after installing:
+#   python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+#
+# wap_gpu.py falls back to CPU automatically if no GPU is found, so a CPU-only
+# torch build still runs — just without the speed-up.
